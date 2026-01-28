@@ -1,0 +1,28 @@
+seed: 123
+
+device: "cuda"
+num_workers: 8
+
+coco:
+  root: "/path/to/coco/images/train2017"
+  ann:  "/path/to/coco/annotations/captions_train2017.json"
+
+clip:
+  model_name: "ViT-B/16"
+
+gen:
+  z_dim: 128
+  text_dim: 512
+  base_ch: 512
+  out_res: 224
+  eps: 0.031372549
+
+train:
+  batch_size: 128
+  epochs: 300
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  tau: 0.07
+  log_every: 50
+  save_every_epochs: 10
+  out_dir: "./runs/vitb16"

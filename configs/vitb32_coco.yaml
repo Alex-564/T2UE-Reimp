@@ -1,0 +1,31 @@
+seed: 123
+
+device: "cuda"
+num_workers: 8
+
+# COCO Captions
+coco:
+  root: "/path/to/coco/images/train2017"
+  ann:  "/path/to/coco/annotations/captions_train2017.json"
+
+# CLIP surrogate
+clip:
+  model_name: "ViT-B/32"   # OpenAI CLIP string
+
+# Generator
+gen:
+  z_dim: 128
+  text_dim: 512           # OpenAI CLIP text embed dim for ViT-B/32
+  base_ch: 512            # start at 4x4x512 as in Fig.3
+  out_res: 224            # CLIP expects 224x224 inputs
+  eps: 0.031372549        # 8/255
+
+train:
+  batch_size: 128
+  epochs: 500
+  lr: 1.0e-4
+  weight_decay: 1.0e-4
+  tau: 0.07               # CLIP-like temperature; stable default
+  log_every: 50
+  save_every_epochs: 10
+  out_dir: "./runs/vitb32"
