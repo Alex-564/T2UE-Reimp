@@ -5,7 +5,7 @@ from typing import Dict, Any, List
 
 import torch
 from torch.utils.data import DataLoader
-from torch.optim import Adam
+from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
 
@@ -72,7 +72,7 @@ def main(cfg_path: str):
     G.train()
 
     # Paper defined optimizer + scheduler:
-    opt = Adam(G.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
+    opt = AdamW(G.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
     # cosine scheduler as in implementation details 
     total_steps = int(cfg["train"]["epochs"]) * len(dl)
     sched = CosineAnnealingLR(opt, T_max=total_steps)

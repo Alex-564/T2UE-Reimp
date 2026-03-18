@@ -13,7 +13,8 @@ class SSCBN(nn.Module):
         self.bn = nn.BatchNorm2d(num_features, affine=False, eps=eps)
         # affline = false, disable internal learned gamma/beta (supplied through text embeddings)
 
-        # small MLPs mapping emb_t -> gamma/beta (per-channel)
+        # Small MLPs mapping emb_t -> gamma/beta (per-channel)
+        # Paper Eq.(2): h' = gamma(emb_t) * BN(h) + beta(emb_t)
         self.gamma = nn.Sequential(
             nn.Linear(text_dim, num_features),
         )
