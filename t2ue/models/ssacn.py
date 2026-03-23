@@ -9,10 +9,11 @@ class SSACNBlock(nn.Module):
     The paper: "sequential application of SSACN blocks, incorporating residual connections
     and upsampling operations".
     """
-    def __init__(self, in_ch: int, out_ch: int, text_dim: int):
+    def __init__(self, in_ch: int, out_ch: int, text_dim: int, upsample: bool = True):
         super().__init__()
         self.in_ch = in_ch
         self.out_ch = out_ch
+        self.upsample = upsample
 
         # text_dim: CLIP text embedding dim (512 for ViT-B/32)
 
@@ -30,9 +31,10 @@ class SSACNBlock(nn.Module):
     def forward(self, x: torch.Tensor, emb_t: torch.Tensor) -> torch.Tensor:
         # Backbone: takes from 4x4 seed map to full res perturbation
 
-        # Upsample (doubles resolution)
-        # nearest mode commonly used in GANs
-        x_up = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        # Optional upsample (nearest is common in GAN generators).
+        x_up = x
+        if self.upsample:
+            x_up = F.interpolate(x, scale_factor=2.0, mode="nearest")
 
         # Residual skip path
         res = x_up

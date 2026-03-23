@@ -1,0 +1,57 @@
+T2UE (Text-to-Unlearnable Example) Re-Implementation Specification Sheet
+
+1. System Overview & Threat Model
+* Objective: To generate Unlearnable Examples (UEs) that disrupt large-scale multimodal contrastive learning (MCL) and supervised learning[cite: 122, 127].
+* Core Mechanism: Decouple noise generation from the source image by learning a mapping from the textual semantic space to the unlearnable perturbation space[cite: 59, 60, 378].
+* Constraint: The perturbation generation must operate completely independently of the original image, achieving "zero-contact" data protection[cite: 27, 42, 61, 377].
+
+2. Architecture Specifications
+The framework consists of a frozen Text Encoder, a learnable Generator (G), and a frozen CLIP Surrogate Model[cite: 128, 129, 130, 131].
+
+2.1 Text Feature Extraction
+* Component: Pre-trained, frozen CLIP Text Encoder[cite: 129].
+* Input: Original text description[cite: 129].
+* Output: Text semantic embedding[cite: 129, 151].
+
+2.2 Generator Network (G)
+* Base Architecture: Adapted from the Semantic-Space-Aware GAN (SSA-GAN) generator[cite: 149].
+* Inputs: Text embedding and a random latent vector sampled from a standard normal distribution[cite: 151].
+* Initial Layer: Fully Connected (FC) layer mapping the latent vector, followed by a reshape operation into a 4 x 4 x 512 spatial feature map[cite: 139, 140, 156].
+* Core Blocks: 7 Semantic-Space-Aware Convolutional Network (SSACN) blocks[cite: 141, 142, 155].
+* Modulation Mechanism: Inside each SSACN block, standard batch normalization is replaced with Semantic-Space Conditional Batch Normalization (SSCBN)[cite: 156, 157]. SSCBN predicts text-specific affine parameters (scale and shift) using small neural networks (linear layers or MLPs)[cite: 157, 161].
+* Output Layer: A Convolutional layer (Conv) followed by a Tanh activation function[cite: 143, 144, 163].
+* Output Shape: Perturbation tensor matching the target image resolution[cite: 163].
+* Perturbation Constraint: The generated noise must be bounded by an L_infinity norm constraint of 8/255[cite: 153, 312].
+
+3. Mathematical Formulations
+
+3.1 SSCBN Operation
+The modulation of intermediate feature maps (h) within the generator is defined as:
+SSCBN(h, emb_t) = gamma(emb_t) * ((h - mu(h)) / sqrt(sigma^2(h) + epsilon_bn)) + beta(emb_t) [cite: 159]
+(Note: mu(h) and sigma^2(h) are the mean and variance of h across batch and spatial dimensions; epsilon_bn is a small constant for numerical stability)[cite: 161].
+
+3.2 Generator Optimization Objective
+The generator is optimized using a frozen surrogate CLIP model by minimizing the InfoNCE contrastive loss over batches of image-text pairs[cite: 134, 177, 178].
+Objective: arg min E [ L_InfoNCE( f_I(I + noise), f_T(T) ) ] [cite: 183]
+(This objective forces the feature of the perturbed image to align strongly with the text feature) [cite: 185, 186].
+
+4. Training & Optimization Setup
+
+4.1 Generator Training Phase
+* Dataset: MSCOCO[cite: 200].
+* Surrogate Models: CLIP ViT-B/32 or ViT-B/16[cite: 309].
+* Hardware: 1 A100 GPU[cite: 311].
+* Batch Size: 128[cite: 310].
+* Optimizer: Adam[cite: 310].
+* Learning Rate: Initial rate of 0.0001, utilizing a cosine scheduler[cite: 310].
+* Regularization: Decoupled weight decay[cite: 310].
+* Epochs: 500 epochs for the ViT-B/32 alignment model; 300 epochs for the ViT-B/16 alignment model[cite: 309].
+
+4.2 Downstream Evaluation (Target / Hacker Models)
+To accurately benchmark the unlearnable effect, mirror these exact target model configurations:
+* MCL Target Models: Train CLIP models using ResNet50 or ViT-B/32 image backbones from scratch for 32 epochs[cite: 201, 311].
+* MCL Evaluation Datasets: Protected versions of Flickr8k, Flickr30k, and Tiny-MSCOCO[cite: 201, 202].
+* Supervised Target Models: ResNet18, ResNet50, ResNet101, ViT-B/16, and ViT-B/32[cite: 308].
+* Supervised Evaluation Datasets: CIFAR-10, CIFAR-100, and STL-10[cite: 308].
+* Supervised Target Optimizer: SGD with a learning rate of 0.1, momentum of 0.9, weight decay of 5.0 x 10^-4, and cosine annealing scheduling[cite: 313].
+* Supervised Epochs: Train for 100 epochs[cite: 312].

@@ -22,7 +22,6 @@ train:
   epochs: 300
   lr: 1.0e-4
   weight_decay: 1.0e-4
-  tau: 0.07
   log_every: 50
   save_every_epochs: 10
   out_dir: "./runs/vitb16"

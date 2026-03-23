@@ -21,6 +21,9 @@ from t2ue.models.clip_surrogate import OpenAIClipSurrogate
 from t2ue.models.generator import T2UEGenerator, GenConfig
 from t2ue.losses.infonce import symmetric_infonce
 
+CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
+CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
+
 
 def collate_fn(batch):
     images, caps = zip(*batch)
@@ -39,6 +42,26 @@ def main(cfg_path: str):
     seed_all(int(cfg["seed"]))
 
     device = torch.device(cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
+
+    # Optional TF32 acceleration on NVIDIA Ampere/Ada GPUs.
+    if device.type == "cuda" and bool(cfg["train"].get("allow_tf32", True)):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+
+    amp_cfg = cfg["train"].get("amp", {"enabled": False, "dtype": "bf16"})
+    if isinstance(amp_cfg, dict):
+        amp_enabled = bool(amp_cfg.get("enabled", False)) and device.type == "cuda"
+        amp_dtype_name = str(amp_cfg.get("dtype", "bf16")).lower()
+    else:
+        amp_enabled = bool(amp_cfg) and device.type == "cuda"
+        amp_dtype_name = "bf16"
+
+    if amp_dtype_name not in ("bf16", "fp16"):
+        raise ValueError(f"Unsupported amp.dtype={amp_dtype_name}. Use 'bf16' or 'fp16'.")
+    amp_dtype = torch.bfloat16 if amp_dtype_name == "bf16" else torch.float16
+    use_grad_scaler = amp_enabled and amp_dtype == torch.float16
+    scaler = torch.amp.GradScaler("cuda", enabled=True) if use_grad_scaler else None
+
     out_dir = Path(cfg["train"]["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -77,8 +100,13 @@ def main(cfg_path: str):
     total_steps = int(cfg["train"]["epochs"]) * len(dl)
     sched = CosineAnnealingLR(opt, T_max=total_steps)
 
+    # CLIP-normalized bounds corresponding to pixel-space [0, 1].
+    clip_mean = torch.tensor(CLIP_MEAN, device=device, dtype=torch.float32).view(1, 3, 1, 1)
+    clip_std = torch.tensor(CLIP_STD, device=device, dtype=torch.float32).view(1, 3, 1, 1)
+    valid_min = (0.0 - clip_mean) / clip_std
+    valid_max = (1.0 - clip_mean) / clip_std
+
     # Checkpointing params
-    tau = float(cfg["train"]["tau"])
     log_every = int(cfg["train"]["log_every"])
     save_every_epochs = int(cfg["train"]["save_every_epochs"])
 
@@ -97,20 +125,27 @@ def main(cfg_path: str):
             # Random latent z ~ N(0, I) 
             z = torch.randn(images.shape[0], gen_cfg.z_dim, device=device)
 
-            # Generate bounded perturbation delta_u, add to image 
-            delta = G(emb_t, z)
-            images_poison = torch.clamp(images + delta, min=-10.0, max=10.0)
-            # Note: images are already CLIP-normalized; clamp here is mainly for numerical sanity.
-
-            # CLIP image embedding (grad flows w.r.t images_poison => delta => G)
-            img_emb = clip_model.encode_image(images_poison)
-
-            # InfoNCE (symmetric) Eq.(3), applied to protected data as Eq.(4) 
-            loss = symmetric_infonce(img_emb, emb_t, tau=tau)
-
             opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
+                # Generate bounded perturbation delta_u, add to image 
+                delta = G(emb_t, z)
+                images_poison = torch.max(torch.min(images + delta, valid_max), valid_min)
+
+                # CLIP image embedding (grad flows w.r.t images_poison => delta => G)
+                img_emb = clip_model.encode_image(images_poison)
+                logit_scale = clip_model.model.logit_scale.exp().detach()
+
+                # InfoNCE (symmetric) Eq.(3), applied to protected data as Eq.(4) 
+                loss = symmetric_infonce(img_emb, emb_t, logit_scale=logit_scale)
+
+            if use_grad_scaler:
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+            else:
+                loss.backward()
+                opt.step()
             sched.step()
 
             meter.update(loss.item(), n=images.shape[0])

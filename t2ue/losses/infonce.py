@@ -1,7 +1,11 @@
 import torch
 import torch.nn.functional as F
 
-def symmetric_infonce(image_emb: torch.Tensor, text_emb: torch.Tensor, tau: float = 0.07) -> torch.Tensor:
+def symmetric_infonce(
+    image_emb: torch.Tensor,
+    text_emb: torch.Tensor,
+    logit_scale: torch.Tensor,
+) -> torch.Tensor:
     """
     image_emb: (B, D) L2-normalized
     text_emb:  (B, D) L2-normalized
@@ -10,11 +14,8 @@ def symmetric_infonce(image_emb: torch.Tensor, text_emb: torch.Tensor, tau: floa
     """
     B = image_emb.shape[0]
     
-    # Similarity Matrix
-    # Transposes text matrix to (D, B)
-    # Matrix multiplication results in (B, B) similarity scores
-    # Temperature scaling with tau
-    logits = (image_emb @ text_emb.t()) / tau
+    # Similarity matrix with CLIP-native logit scaling.
+    logits = logit_scale * (image_emb @ text_emb.t())
 
     # Ground truth labels
     labels = torch.arange(B, device=logits.device)

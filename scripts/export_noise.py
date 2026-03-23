@@ -1,8 +1,10 @@
 import os
 from pathlib import Path
 from typing import List
+import warnings
 
 import torch
+import torch.nn as nn
 import numpy as np
 
 from t2ue.models.clip_surrogate import OpenAIClipSurrogate
@@ -14,6 +16,27 @@ def read_prompts(path: str) -> List[str]:
     with open(path, "r") as f:
         lines = [ln.strip() for ln in f.readlines()]
     return [ln for ln in lines if ln]
+
+
+def warn_if_bn_stats_look_unreliable(model: nn.Module) -> None:
+    bad_layers = []
+    for name, mod in model.named_modules():
+        if isinstance(mod, nn.BatchNorm2d):
+            if mod.running_mean is None or mod.running_var is None:
+                bad_layers.append(name)
+                continue
+            if (not torch.isfinite(mod.running_mean).all()) or (not torch.isfinite(mod.running_var).all()):
+                bad_layers.append(name)
+                continue
+            if (mod.running_var <= 0).any():
+                bad_layers.append(name)
+
+    if bad_layers:
+        warnings.warn(
+            "Generator BatchNorm running stats look unreliable for eval-mode export. "
+            "Verify training used sufficiently large/diverse batches before exporting noise.",
+            stacklevel=2,
+        )
 
 @torch.no_grad()
 def main(ckpt: str, prompts_path: str, out_dir: str, model_name: str, seed: int = 123):
@@ -33,6 +56,7 @@ def main(ckpt: str, prompts_path: str, out_dir: str, model_name: str, seed: int 
     G = T2UEGenerator(gen_cfg).to(device)
     G.load_state_dict(payload["state_dict"], strict=True)
     G.eval()
+    warn_if_bn_stats_look_unreliable(G)
 
     ## Load frozen CLIP surrogate to compute text embeddings
     clip_model = OpenAIClipSurrogate(model_name, device=device).to(device)
