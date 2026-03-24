@@ -5,5 +5,5 @@ pyyaml>=6.0
 tqdm>=4.66
 ftfy>=6.1.1
 regex>=2023.10.3
-git+https://github.com/openai/CLIP.git
+git+https://github.com/openai/CLIP.git@ded190a052fdf4585bd685cee5bc96e0310d2c93
 pycocotools>=2.0.7
