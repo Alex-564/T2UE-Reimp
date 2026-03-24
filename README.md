@@ -19,6 +19,25 @@ Download COCO 2017 train images + captions annotations:
 
 Use CLI arguments when launching training.
 
+## Build deterministic subset annotations
+Create a deterministic percentage subset of MSCOCO annotations (image-ID sampling,
+all captions preserved for sampled images):
+
+python scripts/subset_coco_annotations.py \
+  --src-ann /path/to/coco/annotations/captions_train2017.json \
+  --out-ann /path/to/coco/annotations/captions_train2017_subset50_seed123.json \
+  --fraction 0.5 \
+  --seed 123
+
+This also writes diagnostics JSON by default next to the output annotation file:
+`captions_train2017_subset50_seed123.diagnostics.json`.
+
+Use the subset in training by pointing `--coco-ann` to the subset annotation file:
+
+python scripts/train_generator.py --config configs/vitb32_coco.yaml \
+  --coco-root /path/to/coco/images/train2017 \
+  --coco-ann /path/to/coco/annotations/captions_train2017_subset50_seed123.json
+
 ## Train generator (offline)
 python scripts/train_generator.py --config configs/vitb32_coco.yaml \
   --coco-root /path/to/coco/images/train2017 \

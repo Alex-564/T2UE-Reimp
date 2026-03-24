@@ -68,14 +68,21 @@ def main(cfg_path: str, coco_root: str, coco_ann: str):
     # Explicit CLIP specific expected preprocessing
     tfm = build_clip_image_transform(out_res=int(cfg["gen"]["out_res"]))
     ds = CocoCaptionPairs(root=coco_root, annFile=coco_ann, transform=tfm)
+    num_workers = int(cfg.get("num_workers", 4))
+    dl_kwargs = {}
+    if num_workers > 0:
+        dl_kwargs["persistent_workers"] = True
+        dl_kwargs["prefetch_factor"] = int(cfg.get("prefetch_factor", 2))
+
     dl = DataLoader(
         ds,
         batch_size=int(cfg["train"]["batch_size"]),
         shuffle=True,
-        num_workers=int(cfg.get("num_workers", 4)),
+        num_workers=num_workers,
         pin_memory=True,
         drop_last=True,
         collate_fn=collate_fn,
+        **dl_kwargs,
     )
 
     # Frozen CLIP surrogate (f_I, f_T) 
