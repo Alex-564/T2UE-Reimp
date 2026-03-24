@@ -3,10 +3,7 @@ seed: 123
 device: "cuda"
 num_workers: 8
 
-# COCO Captions
-coco:
-  root: "/path/to/coco/images/train2017"
-  ann:  "/path/to/coco/annotations/captions_train2017.json"
+# COCO paths are provided via CLI (--coco-root, --coco-ann)
 
 # CLIP surrogate
 clip:
@@ -22,9 +19,13 @@ gen:
 
 train:
   batch_size: 128
-  epochs: 500
+  epochs: 250 # reduced from 500 
   lr: 1.0e-4
   weight_decay: 1.0e-4
+  # Enable CUDA mixed precision with bfloat16 by default.
+  amp:
+    enabled: true
+    dtype: "bf16"
   log_every: 50
   save_every_epochs: 10
   out_dir: "./runs/vitb32"

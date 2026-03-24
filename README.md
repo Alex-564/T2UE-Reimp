@@ -17,11 +17,16 @@ Download COCO 2017 train images + captions annotations:
 - images: train2017/
 - annotations: annotations/captions_train2017.json
 
-Set paths in configs/*.yaml
+Use CLI arguments when launching training.
 
 ## Train generator (offline)
-python scripts/train_generator.py --config configs/vitb32_coco.yaml
-python scripts/train_generator.py --config configs/vitb16_coco.yaml
+python scripts/train_generator.py --config configs/vitb32_coco.yaml \
+  --coco-root /path/to/coco/images/train2017 \
+  --coco-ann /path/to/coco/annotations/captions_train2017.json
+
+python scripts/train_generator.py --config configs/vitb16_coco.yaml \
+  --coco-root /path/to/coco/images/train2017 \
+  --coco-ann /path/to/coco/annotations/captions_train2017.json
 
 Checkpoints appear in runs/vitb32/ or runs/vitb16/
 

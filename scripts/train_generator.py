@@ -1,7 +1,5 @@
-import os
-import math
 from pathlib import Path
-from typing import Dict, Any, List
+from typing import Dict, Any
 
 import torch
 from torch.utils.data import DataLoader
@@ -32,7 +30,7 @@ def collate_fn(batch):
     return images, caps
 
 
-def main(cfg_path: str):
+def main(cfg_path: str, coco_root: str, coco_ann: str):
     """
     Train the T2UE generator G to minimize the InfoNCE loss computed
     by frozen CLIP surrogate (f_I, f_T) on poisoned data.
@@ -69,7 +67,7 @@ def main(cfg_path: str):
     # Uses COCO Captioneds dataset as per paper specificaiton
     # Explicit CLIP specific expected preprocessing
     tfm = build_clip_image_transform(out_res=int(cfg["gen"]["out_res"]))
-    ds = CocoCaptionPairs(root=cfg["coco"]["root"], annFile=cfg["coco"]["ann"], transform=tfm)
+    ds = CocoCaptionPairs(root=coco_root, annFile=coco_ann, transform=tfm)
     dl = DataLoader(
         ds,
         batch_size=int(cfg["train"]["batch_size"]),
@@ -174,5 +172,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, type=str)
+    ap.add_argument("--coco-root", required=True, type=str, help="Path to COCO train images directory")
+    ap.add_argument("--coco-ann", required=True, type=str, help="Path to COCO captions annotation JSON")
     args = ap.parse_args()
-    main(args.config)
+    main(args.config, args.coco_root, args.coco_ann)

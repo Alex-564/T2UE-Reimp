@@ -3,10 +3,6 @@ seed: 123
 device: "cuda"
 num_workers: 8
 
-coco:
-  root: "/path/to/coco/images/train2017"
-  ann:  "/path/to/coco/annotations/captions_train2017.json"
-
 clip:
   model_name: "ViT-B/16"
 
@@ -22,6 +18,10 @@ train:
   epochs: 300
   lr: 1.0e-4
   weight_decay: 1.0e-4
+  # Enable CUDA mixed precision with bfloat16 by default.
+  amp:
+    enabled: true
+    dtype: "bf16"
   log_every: 50
   save_every_epochs: 10
   out_dir: "./runs/vitb16"
