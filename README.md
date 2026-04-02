@@ -62,3 +62,65 @@ python scripts/export_noise.py \
 
 This writes delta_*.npy files (3x224x224) in CLIP-normalized tensor space.
 
+## Class-wise zero-contact pipeline (single pass)
+
+The class-wise workflow remains conceptually split into:
+1. Phase 1: deterministic class manifest generation.
+2. Delta generation from class prompts and seeds.
+3. Poison application to samples from cached class deltas.
+
+Script execution is now single-pass only for steps 2+3:
+- `scripts/generate_only_t2ue.py` always runs delta generation followed by apply.
+- Phase flags are removed.
+- Delta regeneration is the default protocol to avoid stale-cache reuse.
+
+### Phase 1: build class manifest
+
+Create a deterministic `class_manifest.json` that maps each class to one prompt and one latent seed.
+
+```bash
+python scripts/build_t2ue_class_manifest.py \
+  --manifest-csv /path/to/manifest.csv \
+  --annotation-csv /path/to/identity_metadata.csv \
+  --prompt-template "A photo of {class_name}" \
+  --master-seed 0 \
+  --out-class-manifest /path/to/class_manifest.json
+```
+
+Notes:
+- The builder only uses identities present in the passed manifest CSV.
+- Annotation names are matched by identity key overlap and cleaned before templating.
+- If an identity is missing in annotation CSV, `raw_id` is used as fallback `class_name`.
+- Prompt placeholders: `{class_id}`, `{raw_id}`, `{class_name}`.
+
+### Single-pass run (delta generation + apply)
+
+```bash
+python scripts/generate_only_t2ue.py \
+  --class-manifest /path/to/class_manifest.json \
+  --samples-csv /path/to/samples.csv \
+  --t2ue-ckpt /path/to/generator_epoch0500.pt \
+  --out-delta-dir /path/to/delta_cache \
+  --out-images-dir /path/to/poisoned/images \
+  --out-poison-map /path/to/poison_map.csv \
+  --clip-model "ViT-B/32" \
+  --batch-size 32 \
+  --num-workers 0 \
+  --image-format png \
+  --input-size 112 \
+  --device cuda:0
+```
+
+`samples.csv` must include:
+- `clean_path`
+- `label`
+- optional `poisoned_rel_path`
+
+Output path convention matches REM/CUDA:
+- If `poisoned_rel_path` exists, it is preserved (including identity subfolders).
+- If missing, output falls back to `<basename>.<image_format>`.
+
+Notes:
+- Default behavior regenerates all class deltas each run.
+- To reuse valid cache entries (only when metadata matches), pass `--skip-regenerate-deltas`.
+

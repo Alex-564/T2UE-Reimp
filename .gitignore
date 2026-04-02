@@ -1,0 +1,39 @@
+# data & artifacts
+/data 
+**/checkpoints/
+**/runs/
+**/logs/
+**/results/
+**/output/
+**/wandb/
+
+# python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.ipynb_checkpoints/
+
+# envs
+.env
+.venv/
+venv/
+env/
+.envrc
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# big files
+*.pt
+*.pth
+*.ckpt
+*.npz
+*.npy
+
+# caches
+**/poison_cache/
+**/results_cache/
