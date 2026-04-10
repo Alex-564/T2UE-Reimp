@@ -29,4 +29,4 @@ train:
     dtype: "bf16"
   log_every: 50
   save_every_epochs: 20
-  out_dir: "./runs/vitb32_epoch200_cocoFull"
+  out_dir: "./runs/vitb32_epoch200_coco50"
