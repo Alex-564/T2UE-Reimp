@@ -1,10 +1,11 @@
+import importlib
 import json
 import os
 import random
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
 import torch
@@ -51,7 +52,7 @@ def _write_json_atomic(path: Path, obj: Dict[str, Any]) -> None:
     os.replace(tmp_path, path)
 
 
-def _build_compat_signature(cfg: Dict[str, Any], dl_len: int) -> Dict[str, Any]:
+def _build_compat_signature(cfg: Dict[str, Any], dl_len: int, dataset_info: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "clip_model_name": str(cfg["clip"]["model_name"]),
         "gen": {
@@ -69,6 +70,7 @@ def _build_compat_signature(cfg: Dict[str, Any], dl_len: int) -> Dict[str, Any]:
         },
         "num_workers": int(cfg.get("num_workers", 4)),
         "prefetch_factor": int(cfg.get("prefetch_factor", 2)),
+        "dataset": dataset_info,
         "dl_len": int(dl_len),
     }
 
@@ -102,7 +104,110 @@ def collate_fn(batch):
     return images, caps
 
 
-def main(cfg_path: str, coco_root: str, coco_ann: str, resume: Optional[str] = None):
+def _pick_wds_caption(meta: Dict[str, Any]) -> str:
+    captions = meta.get("captions")
+    if not isinstance(captions, list) or len(captions) == 0:
+        raise ValueError("WebDataset sample metadata must contain a non-empty 'captions' list.")
+    return random.choice(captions)
+
+
+def _build_train_loader(
+    cfg: Dict[str, Any],
+    tfm,
+    coco_root: Optional[str],
+    coco_ann: Optional[str],
+    wds_pattern: Optional[str],
+    wds_num_samples: Optional[int],
+    wds_shuffle: int,
+) -> Tuple[DataLoader, Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    num_workers = int(cfg.get("num_workers", 4))
+    batch_size = int(cfg["train"]["batch_size"])
+
+    dl_kwargs: Dict[str, Any] = {}
+    if num_workers > 0:
+        dl_kwargs["persistent_workers"] = True
+        dl_kwargs["prefetch_factor"] = int(cfg.get("prefetch_factor", 2))
+
+    if wds_pattern is not None:
+        if wds_num_samples is None or int(wds_num_samples) <= 0:
+            raise ValueError("--wds-num-samples must be a positive integer when --wds-pattern is used.")
+
+        try:
+            wds = importlib.import_module("webdataset")
+        except ModuleNotFoundError as exc:
+            raise ImportError(
+                "WebDataset support requires the 'webdataset' package. Install dependencies from requirements.txt."
+            ) from exc
+
+        ds = (
+            wds.WebDataset(str(wds_pattern), shardshuffle=True)
+            .shuffle(int(wds_shuffle))
+            .decode("pil")
+            .to_tuple("jpg", "json")
+            .map_tuple(tfm, _pick_wds_caption)
+            .with_length(int(wds_num_samples))
+        )
+
+        dl = DataLoader(
+            ds,
+            batch_size=batch_size,
+            shuffle=False,
+            num_workers=num_workers,
+            pin_memory=True,
+            drop_last=True,
+            collate_fn=collate_fn,
+            **dl_kwargs,
+        )
+
+        dataset_info = {
+            "kind": "webdataset",
+            "pattern": str(wds_pattern),
+            "num_samples": int(wds_num_samples),
+            "shuffle_buffer": int(wds_shuffle),
+        }
+        runtime_data = {
+            "source": "webdataset",
+            "dataloader_shuffle": False,
+            "dataset_shuffle_buffer": int(wds_shuffle),
+        }
+        return dl, dl_kwargs, dataset_info, runtime_data
+
+    if coco_root is None or coco_ann is None:
+        raise ValueError("COCO mode requires both --coco-root and --coco-ann.")
+
+    ds = CocoCaptionPairs(root=coco_root, annFile=coco_ann, transform=tfm)
+    dl = DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        pin_memory=True,
+        drop_last=True,
+        collate_fn=collate_fn,
+        **dl_kwargs,
+    )
+
+    dataset_info = {
+        "kind": "coco_captions",
+        "coco_root": str(coco_root),
+        "coco_ann": str(coco_ann),
+    }
+    runtime_data = {
+        "source": "coco_captions",
+        "dataloader_shuffle": True,
+    }
+    return dl, dl_kwargs, dataset_info, runtime_data
+
+
+def main(
+    cfg_path: str,
+    coco_root: Optional[str] = None,
+    coco_ann: Optional[str] = None,
+    wds_pattern: Optional[str] = None,
+    wds_num_samples: Optional[int] = None,
+    wds_shuffle: int = 10000,
+    resume: Optional[str] = None,
+):
     """
     Train the T2UE generator G to minimize the InfoNCE loss computed
     by frozen CLIP surrogate (f_I, f_T) on poisoned data.
@@ -137,27 +242,19 @@ def main(cfg_path: str, coco_root: str, coco_ann: str, resume: Optional[str] = N
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Data loading
-    # Uses COCO Captioneds dataset as per paper specificaiton
-    # Explicit CLIP specific expected preprocessing
+    # Uses either COCO captions dataset or WebDataset shards with the same random-caption semantics.
     tfm = build_clip_image_transform(out_res=int(cfg["gen"]["out_res"]))
-    ds = CocoCaptionPairs(root=coco_root, annFile=coco_ann, transform=tfm)
-    num_workers = int(cfg.get("num_workers", 4))
-    dl_kwargs = {}
-    if num_workers > 0:
-        dl_kwargs["persistent_workers"] = True
-        dl_kwargs["prefetch_factor"] = int(cfg.get("prefetch_factor", 2))
-
-    dl = DataLoader(
-        ds,
-        batch_size=int(cfg["train"]["batch_size"]),
-        shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        drop_last=True,
-        collate_fn=collate_fn,
-        **dl_kwargs,
+    dl, dl_kwargs, dataset_info, runtime_data = _build_train_loader(
+        cfg=cfg,
+        tfm=tfm,
+        coco_root=coco_root,
+        coco_ann=coco_ann,
+        wds_pattern=wds_pattern,
+        wds_num_samples=wds_num_samples,
+        wds_shuffle=wds_shuffle,
     )
-    compat_sig = _build_compat_signature(cfg, dl_len=len(dl))
+    num_workers = int(cfg.get("num_workers", 4))
+    compat_sig = _build_compat_signature(cfg, dl_len=len(dl), dataset_info=dataset_info)
 
     # Frozen CLIP surrogate (f_I, f_T) 
     clip_model = OpenAIClipSurrogate(cfg["clip"]["model_name"], device=device).to(device)
@@ -337,7 +434,9 @@ def main(cfg_path: str, coco_root: str, coco_ann: str, resume: Optional[str] = N
                     "cudnn_benchmark": bool(torch.backends.cudnn.benchmark),
                     "num_workers": int(num_workers),
                     "persistent_workers": bool(dl_kwargs.get("persistent_workers", False)),
-                    "shuffle": True,
+                    "data_source": str(runtime_data.get("source")),
+                    "dataloader_shuffle": bool(runtime_data.get("dataloader_shuffle", False)),
+                    "dataset_shuffle_buffer": runtime_data.get("dataset_shuffle_buffer"),
                 },
                 "scheduler_policy": scheduler_policy,
             },
@@ -376,8 +475,26 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, type=str)
-    ap.add_argument("--coco-root", required=True, type=str, help="Path to COCO train images directory")
-    ap.add_argument("--coco-ann", required=True, type=str, help="Path to COCO captions annotation JSON")
+    ap.add_argument("--coco-root", default=None, type=str, help="Path to COCO train images directory")
+    ap.add_argument("--coco-ann", default=None, type=str, help="Path to COCO captions annotation JSON")
+    ap.add_argument(
+        "--wds-pattern",
+        default=None,
+        type=str,
+        help="WebDataset shard URL/pattern, e.g. /path/train-{000000..000011}.tar",
+    )
+    ap.add_argument(
+        "--wds-num-samples",
+        default=None,
+        type=int,
+        help="Total number of samples represented by the WebDataset shards.",
+    )
+    ap.add_argument(
+        "--wds-shuffle",
+        default=10000,
+        type=int,
+        help="WebDataset in-memory shuffle buffer size.",
+    )
     ap.add_argument(
         "--resume",
         default=None,
@@ -385,4 +502,23 @@ if __name__ == "__main__":
         help="Optional checkpoint path for epoch-boundary resume with deterministic state restoration.",
     )
     args = ap.parse_args()
-    main(args.config, args.coco_root, args.coco_ann, resume=args.resume)
+
+    using_wds = args.wds_pattern is not None
+    if using_wds:
+        if args.coco_root is not None or args.coco_ann is not None:
+            ap.error("Use either --wds-pattern mode or --coco-root/--coco-ann mode, not both.")
+        if args.wds_num_samples is None:
+            ap.error("--wds-num-samples is required when --wds-pattern is set.")
+    else:
+        if args.coco_root is None or args.coco_ann is None:
+            ap.error("Provide --coco-root and --coco-ann when --wds-pattern is not used.")
+
+    main(
+        cfg_path=args.config,
+        coco_root=args.coco_root,
+        coco_ann=args.coco_ann,
+        wds_pattern=args.wds_pattern,
+        wds_num_samples=args.wds_num_samples,
+        wds_shuffle=int(args.wds_shuffle),
+        resume=args.resume,
+    )

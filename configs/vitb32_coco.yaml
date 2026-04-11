@@ -1,8 +1,8 @@
 seed: 123
 
 device: "cuda"
-num_workers: 2
-prefetch_factor: 2
+num_workers: 4
+prefetch_factor: 1
 
 # COCO paths are provided via CLI (--coco-root, --coco-ann)
 
