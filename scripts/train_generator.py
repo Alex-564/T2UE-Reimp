@@ -26,6 +26,8 @@ from t2ue.models.clip_surrogate import OpenAIClipSurrogate
 from t2ue.models.generator import T2UEGenerator, GenConfig
 from t2ue.losses.infonce import symmetric_infonce
 
+# text-to-unlearnable-examples t2ue generator training stage
+# train G with frozen clip surrogate and symmetric infonce objective
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD = (0.26862954, 0.26130258, 0.27577711)
 
@@ -35,6 +37,7 @@ def _iso_now() -> str:
 
 
 def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
+    # append with fsync so long runs keep recoverable logs
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(obj, ensure_ascii=True) + "\n")
@@ -43,6 +46,7 @@ def _append_jsonl(path: Path, obj: Dict[str, Any]) -> None:
 
 
 def _write_json_atomic(path: Path, obj: Dict[str, Any]) -> None:
+    # atomic write prevents partial summary files on interruption
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
@@ -53,6 +57,7 @@ def _write_json_atomic(path: Path, obj: Dict[str, Any]) -> None:
 
 
 def _build_compat_signature(cfg: Dict[str, Any], dl_len: int, dataset_info: Dict[str, Any]) -> Dict[str, Any]:
+    # signature guards deterministic resume compatibility
     return {
         "clip_model_name": str(cfg["clip"]["model_name"]),
         "gen": {
@@ -76,6 +81,7 @@ def _build_compat_signature(cfg: Dict[str, Any], dl_len: int, dataset_info: Dict
 
 
 def _get_rng_state(device: torch.device) -> Dict[str, Any]:
+    # store all rng states for exact resume behavior
     return {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
@@ -98,6 +104,7 @@ def _set_rng_state(payload: Dict[str, Any], device: torch.device) -> None:
 
 
 def collate_fn(batch):
+    # shared collate for coco and webdataset modes
     images, caps = zip(*batch)
     images = torch.stack(images, dim=0)
     caps = list(caps)
@@ -105,6 +112,7 @@ def collate_fn(batch):
 
 
 def _pick_wds_caption(meta: Dict[str, Any]) -> str:
+    # match t2ue training by sampling one caption per image
     captions = meta.get("captions")
     if not isinstance(captions, list) or len(captions) == 0:
         raise ValueError("WebDataset sample metadata must contain a non-empty 'captions' list.")
@@ -140,6 +148,7 @@ def _build_train_loader(
             ) from exc
 
         ds = (
+            # shardshuffle plus sample shuffle follows common t2ue setup
             wds.WebDataset(str(wds_pattern), shardshuffle=True)
             .shuffle(int(wds_shuffle))
             .decode("pil")
@@ -175,6 +184,7 @@ def _build_train_loader(
     if coco_root is None or coco_ann is None:
         raise ValueError("COCO mode requires both --coco-root and --coco-ann.")
 
+    # default mode uses coco image caption pairs
     ds = CocoCaptionPairs(root=coco_root, annFile=coco_ann, transform=tfm)
     dl = DataLoader(
         ds,
@@ -208,18 +218,14 @@ def main(
     wds_shuffle: int = 10000,
     resume: Optional[str] = None,
 ):
-    """
-    Train the T2UE generator G to minimize the InfoNCE loss computed
-    by frozen CLIP surrogate (f_I, f_T) on poisoned data.
-    
-    """
+    # t2ue paper stage 1 optimize generator with frozen clip surrogate
     cfg: Dict[str, Any] = load_yaml(cfg_path)
     seed_all(int(cfg["seed"]))
     run_started = time.perf_counter()
 
     device = torch.device(cfg.get("device", "cuda") if torch.cuda.is_available() else "cpu")
 
-    # Optional TF32 acceleration on NVIDIA Ampere/Ada GPUs.
+    # optional tf32 speedup on supported gpus
     if device.type == "cuda" and bool(cfg["train"].get("allow_tf32", True)):
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
@@ -241,8 +247,7 @@ def main(
     out_dir = Path(cfg["train"]["out_dir"])
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Data loading
-    # Uses either COCO captions dataset or WebDataset shards with the same random-caption semantics.
+    # data from coco pairs or webdataset shards with same caption sampling rule
     tfm = build_clip_image_transform(out_res=int(cfg["gen"]["out_res"]))
     dl, dl_kwargs, dataset_info, runtime_data = _build_train_loader(
         cfg=cfg,
@@ -256,10 +261,10 @@ def main(
     num_workers = int(cfg.get("num_workers", 4))
     compat_sig = _build_compat_signature(cfg, dl_len=len(dl), dataset_info=dataset_info)
 
-    # Frozen CLIP surrogate (f_I, f_T) 
+    # frozen clip surrogate f_I f_T
     clip_model = OpenAIClipSurrogate(cfg["clip"]["model_name"], device=device).to(device)
 
-    # Generator G (learnable) 
+    # trainable generator G
     gen_cfg = GenConfig(
         z_dim=int(cfg["gen"]["z_dim"]),
         text_dim=int(cfg["gen"]["text_dim"]),
@@ -270,20 +275,19 @@ def main(
     G = T2UEGenerator(gen_cfg).to(device)
     G.train()
 
-    # Paper defined optimizer + scheduler:
+    # optimizer and cosine schedule follow paper implementation details
     opt = AdamW(G.parameters(), lr=float(cfg["train"]["lr"]), weight_decay=float(cfg["train"]["weight_decay"]))
-    # cosine scheduler as in implementation details 
     total_steps = int(cfg["train"]["epochs"]) * len(dl)
     sched = CosineAnnealingLR(opt, T_max=total_steps)
     scheduler_policy = "new_total_steps"
 
-    # CLIP-normalized bounds corresponding to pixel-space [0, 1].
+    # clip-space bounds equivalent to pixel-space clamp in [0 1]
     clip_mean = torch.tensor(CLIP_MEAN, device=device, dtype=torch.float32).view(1, 3, 1, 1)
     clip_std = torch.tensor(CLIP_STD, device=device, dtype=torch.float32).view(1, 3, 1, 1)
     valid_min = (0.0 - clip_mean) / clip_std
     valid_max = (1.0 - clip_mean) / clip_std
 
-    # Checkpointing params
+    # logging and checkpoint cadence
     log_every = int(cfg["train"]["log_every"])
     save_every_epochs = int(cfg["train"]["save_every_epochs"])
     metrics_path = out_dir / "metrics.jsonl"
@@ -314,7 +318,7 @@ def main(
             raise ValueError("Resume checkpoint is missing scheduler state.")
         sched.load_state_dict(payload["scheduler"])
 
-        # Policy: keep a strict step-wise schedule shape for the current target epochs.
+        # keep step schedule shape consistent after resume
         sched.T_max = total_steps
 
         _set_rng_state(payload, device=device)
@@ -347,25 +351,25 @@ def main(
         for images, caps in pbar:
             images = images.to(device, non_blocking=True)
 
-            # Text features from frozen encoder (CLIP text encoder) 
+            # text embedding from frozen clip encoder
             with torch.no_grad():
                 emb_t = clip_model.encode_text(caps)  # (B,D)
 
-            # Random latent z ~ N(0, I) 
+            # latent z ~ N(0 I)
             z = torch.randn(images.shape[0], gen_cfg.z_dim, device=device)
 
             opt.zero_grad(set_to_none=True)
 
             with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp_enabled):
-                # Generate bounded perturbation delta_u, add to image 
+                # generate bounded delta_u then apply to image
                 delta = G(emb_t, z)
                 images_poison = torch.max(torch.min(images + delta, valid_max), valid_min)
 
-                # CLIP image embedding (grad flows w.r.t images_poison => delta => G)
+                # image embedding path where grads flow back into G
                 img_emb = clip_model.encode_image(images_poison)
                 logit_scale = clip_model.model.logit_scale.exp().detach()
 
-                # InfoNCE (symmetric) Eq.(3), applied to protected data as Eq.(4) 
+                # paper objective uses symmetric infonce on protected pairs
                 loss = symmetric_infonce(img_emb, emb_t, logit_scale=logit_scale)
 
             if use_grad_scaler:

@@ -9,6 +9,8 @@ from typing import Any, Dict, List
 from tqdm import tqdm
 
 
+# text-to-unlearnable-examples t2ue trains on mscoco image text pairs
+# this helper converts coco json into webdataset shards for the same pipeline
 def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -16,17 +18,23 @@ def _iso_now() -> str:
 def _load_coco_annotations(annotation_file: Path) -> Dict[str, Any]:
     if not annotation_file.exists():
         raise FileNotFoundError(f"Annotation file does not exist: {annotation_file}")
+    
     with annotation_file.open("r", encoding="utf-8") as f:
         payload = json.load(f)
+
     if not isinstance(payload, dict):
         raise ValueError("COCO annotation payload root must be an object/dict.")
+    
     if "images" not in payload or "annotations" not in payload:
         raise ValueError("COCO annotation payload must include 'images' and 'annotations' keys.")
+    
     if not isinstance(payload["images"], list) or not isinstance(payload["annotations"], list):
         raise ValueError("COCO 'images' and 'annotations' entries must be lists.")
+    
     return payload
 
 
+# keep all captions per image id since t2ue samples text variants during training
 def _build_caption_index(annotations: List[Dict[str, Any]]) -> Dict[int, List[str]]:
     img_to_captions: Dict[int, List[str]] = defaultdict(list)
     for ann in annotations:
@@ -68,11 +76,13 @@ def convert_coco_to_wds(
     pattern = f"{output_prefix}-%06d.tar"
     print(f"Writing WebDataset shards to: {pattern}")
 
+    # counters for data quality checks when reproducing paper runs
     written = 0
     missing_images = 0
     skipped_empty_captions = 0
     malformed_rows = 0
 
+    # shard writer handles tar rollover with maxcount maxsize constraints
     with wds.ShardWriter(pattern, maxcount=maxcount, maxsize=maxsize) as sink:
         for row in tqdm(images, total=len(images), desc="Converting"):
             image_id = row.get("id")
@@ -95,6 +105,7 @@ def convert_coco_to_wds(
             with img_path.open("rb") as stream:
                 image_bytes = stream.read()
 
+            # json sidecar keeps caption list so loader can sample text per image
             sample = {
                 "__key__": str(image_id).zfill(12),
                 "jpg": image_bytes,
@@ -107,6 +118,7 @@ def convert_coco_to_wds(
             sink.write(sample)
             written += 1
 
+    # record outputs so experiment runs can be audited later
     shard_paths = sorted(output_prefix.parent.glob(f"{output_prefix.name}-*.tar"))
     return {
         "timestamp_utc": _iso_now(),
@@ -162,6 +174,7 @@ def main() -> None:
     output_prefix = Path(args.output_prefix)
     meta_json = Path(args.meta_json) if args.meta_json is not None else output_prefix.with_suffix(".meta.json")
 
+    # conversion is deterministic given fixed input files and order
     summary = convert_coco_to_wds(
         image_dir=image_dir,
         annotation_file=annotation_file,
@@ -171,17 +184,18 @@ def main() -> None:
         allow_empty_captions=bool(args.allow_empty_captions),
     )
 
+    # save run metadata beside shard output
     meta_json.parent.mkdir(parents=True, exist_ok=True)
     with meta_json.open("w", encoding="utf-8") as f:
         json.dump(summary, f, indent=2, ensure_ascii=True)
 
     print("Conversion complete")
-    print(f"  written samples:       {summary['written_samples']}")
-    print(f"  shard count:           {summary['num_shards']}")
-    print(f"  skipped empty caption: {summary['skipped_empty_captions']}")
-    print(f"  missing images:        {summary['missing_images']}")
-    print(f"  malformed rows:        {summary['malformed_rows']}")
-    print(f"  metadata json:         {meta_json}")
+    print(f" written samples: {summary['written_samples']}")
+    print(f" shard count: {summary['num_shards']}")
+    print(f" skipped empty caption: {summary['skipped_empty_captions']}")
+    print(f" missing images: {summary['missing_images']}")
+    print(f" malformed rows: {summary['malformed_rows']}")
+    print(f" metadata json: {meta_json}")
 
 
 if __name__ == "__main__":

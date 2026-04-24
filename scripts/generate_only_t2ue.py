@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
-# Allow direct execution from repository root without requiring PYTHONPATH tweaks.
+# allow direct run from repo root without extra pythonpath setup
 SCRIPT_DIR = Path(__file__).resolve().parent
 T2UE_REPO_ROOT = SCRIPT_DIR.parent
 if str(T2UE_REPO_ROOT) not in sys.path:
@@ -27,10 +27,12 @@ from t2ue.models.clip_surrogate import OpenAIClipSurrogate
 from t2ue.models.generator import T2UEGenerator, GenConfig
 from t2ue.utils.checkpoint import load_checkpoint
 
-# hardcode CLIP mean/std.
+# text-to-unlearnable-examples t2ue apply stage
+# clip stats are fixed so delta conversion stays consistent with training
 CLIP_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_STD  = (0.26862954, 0.26130258, 0.27577711)
 
+# tensor to image array for deterministic writes
 def tensor_to_uint8_hwc(x: torch.Tensor) -> np.ndarray:
     x = x.detach().clamp(0, 1).cpu()
     return (x.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
@@ -79,9 +81,8 @@ def file_sha256(path: str) -> str:
 
 
 class T2UEImageDataset(Dataset):
-    """Deterministic CSV-order image dataset for batched apply."""
-
     def __init__(self, samples: List[Tuple[str, int, str]], input_size: int, interpolation: str):
+        # keep csv order so apply pass stays reproducible
         self.samples = samples
         self.tf = build_image_loader_tf(input_size, interpolation)
 
@@ -109,13 +110,9 @@ def build_image_loader_tf(input_size: int, interpolation: str):
         transforms.ToTensor(),  # [0,1]
     ])
 
+# t2ue generator outputs delta in clip-normalized space
+# convert back into pixel-space delta for image write path
 def delta_norm_to_pixel(delta_norm: torch.Tensor) -> torch.Tensor:
-    """
-    Convert delta in CLIP-normalized space to pixel-space delta:
-      x = (p - mean)/std
-      x' = x + delta_norm  => p' = p + delta_norm * std
-    So delta_pixel = delta_norm * std
-    """
     std = torch.tensor(CLIP_STD, device=delta_norm.device).view(1,3,1,1)
     return delta_norm * std
 
@@ -143,6 +140,7 @@ def resolve_poisoned_output_path(
 
 
 def load_class_manifest(path: str) -> List[Dict[str, Any]]:
+    # accepts object or list format then normalizes by class_id
     with open(path, "r", encoding="utf-8") as f:
         raw = json.load(f)
 
@@ -219,6 +217,7 @@ def expected_delta_meta(
     ckpt_path: str,
     class_manifest_sha256: str,
 ) -> Dict[str, Any]:
+    # cache metadata binds delta to ckpt clip model and manifest hash
     return {
         "class_id": int(class_id),
         "prompt": str(prompt),
@@ -241,6 +240,7 @@ def validate_cached_delta(delta_path: Path, meta_path: Path, expected_meta: Dict
 
 
 def load_samples(samples_csv: str) -> List[Tuple[str, int, str]]:
+    # samples map each clean image to class label and output relative path
     samples: List[Tuple[str, int, str]] = []
     with open(samples_csv, "r", newline="", encoding="utf-8") as f:
         r = csv.DictReader(f)
@@ -267,6 +267,7 @@ def load_samples(samples_csv: str) -> List[Tuple[str, int, str]]:
     return samples
 
 def load_t2ue_generator(ckpt_path: str, device: torch.device):
+    # trained generator from t2ue paper stage 1
     payload = load_checkpoint(ckpt_path, map_location="cpu")
     gen_cfg_dict = payload["gen_cfg"]
 
@@ -278,6 +279,7 @@ def load_t2ue_generator(ckpt_path: str, device: torch.device):
     return G, cfg
 
 def load_openai_clip_surrogate(model_name: str, device: torch.device):
+    # frozen clip surrogate drives text embedding
     clip_model = OpenAIClipSurrogate(model_name, device=device).to(device)
     clip_model.eval()
     return clip_model
@@ -295,12 +297,8 @@ def generate_class_deltas(
     class_manifest_sha256: str,
     force: bool = False,
 ):
-    """
-    Generates and saves one delta per class deterministically.
-    Saves:
-      out_delta_dir/delta_classXXXX.npy  (pixel-space delta, [3,H,W] float32)
-      out_delta_dir/delta_classXXXX_meta.json  (prompt, seed)
-    """
+    # generate one cached delta per class id from prompt plus z seed
+    # this is the zero-contact step from text-to-unlearnable-examples t2ue
     out_delta_dir.mkdir(parents=True, exist_ok=True)
 
     for entry in tqdm(class_manifest, desc="Generate class deltas"):
@@ -322,21 +320,21 @@ def generate_class_deltas(
         if (not force) and validate_cached_delta(delta_path, meta_path, meta_obj):
             continue
 
-        # Deterministic z from per-class seed
+        # deterministic z from per-class seed in class manifest
         g = torch.Generator(device=device)
         g.manual_seed(z_seed)
         z = torch.randn(1, gen_cfg.z_dim, generator=g, device=device)
 
-        # Text embedding (frozen CLIP)
+        # frozen clip text embedding
         emb_t = clip_model.encode_text([prompt])  # (1,D), normalized
 
-        # delta in CLIP-normalized space from G (current repo behavior)
+        # generator output in clip-normalized delta space
         delta_norm = G(emb_t, z)  # (1,3,H,W), bounded by eps in normalized units
 
-        # Convert to pixel-space delta for saving/applying to real images
+        # convert once so apply stage only uses pixel deltas
         delta_pix = delta_norm_to_pixel(delta_norm)  # (1,3,H,W)
 
-        # Save
+        # save delta and cache signature metadata
         np.save(delta_path, delta_pix[0].float().cpu().numpy().astype(np.float32))
         atomic_write_json(str(meta_path), meta_obj)
 
@@ -350,6 +348,7 @@ def load_and_validate_delta_for_label(
     ckpt_path: str,
     class_manifest_sha256: str,
 ) -> torch.Tensor:
+    # verify cache metadata before loading delta for a sample label
     expected = expected_manifest.get(int(label))
     if expected is None:
         raise RuntimeError(
@@ -374,6 +373,7 @@ def load_and_validate_delta_for_label(
 
     delta_pix = np.load(delta_path)
     delta_t = torch.from_numpy(delta_pix).unsqueeze(0)
+    # resize deltas if apply resolution differs from generator resolution
     if tuple(delta_t.shape[-2:]) != tuple(target_hw):
         delta_t = F.interpolate(delta_t, size=target_hw, mode="bilinear", align_corners=False)
     return delta_t
@@ -395,6 +395,7 @@ def apply_cached_deltas(
     ckpt_path: str,
     class_manifest_sha256: str,
 ) -> Tuple[List[Tuple[str, str]], float, float, int, float]:
+    # apply cached class deltas to dataset images in csv order
     ds = T2UEImageDataset(samples=samples, input_size=input_size, interpolation=interpolation)
     dl = DataLoader(
         ds,
@@ -421,6 +422,7 @@ def apply_cached_deltas(
         for i in range(xb.size(0)):
             label = int(yb[i].item())
             if label not in delta_cache:
+                # load each class delta once then reuse inside the run
                 delta_cache[label] = load_and_validate_delta_for_label(
                     label=label,
                     out_delta_dir=out_delta_dir,
@@ -467,7 +469,7 @@ def apply_cached_deltas(
 def main():
     ap = argparse.ArgumentParser()
 
-    # Inputs / outputs: single-pass all workflow
+    # single pass workflow for t2ue generation plus apply
     ap.add_argument("--samples-csv", type=str, required=True)
     ap.add_argument("--class-manifest", type=str, required=True)
     ap.add_argument("--t2ue-ckpt", type=str, required=True)
@@ -477,7 +479,7 @@ def main():
     ap.add_argument("--out-poison-map", type=str, required=True)
     ap.add_argument("--out-metrics-json", type=str, default=None)
 
-    # Cache
+    # class delta cache
     ap.add_argument("--out-delta-dir", type=str, required=True, help="Where per-class deltas are cached")
     ap.add_argument(
         "--skip-regenerate-deltas",
@@ -485,14 +487,14 @@ def main():
         help="Reuse valid cached deltas instead of regenerating (default regenerates).",
     )
 
-    # Image handling
+    # image io settings
     ap.add_argument("--input-size", type=int, default=112, help="Resize images to this before applying poison")
     ap.add_argument("--interpolation", type=str, default="bilinear",
                     choices=["nearest", "bilinear", "bicubic", "lanczos"])
     ap.add_argument("--image-format", type=str, default="png", choices=["png", "jpg"])
     ap.add_argument("--save-quality", type=int, default=100)
 
-    # Determinism / performance 
+    # runtime controls
     ap.add_argument("--device", type=str, default="cuda:0")
     ap.add_argument("--num-workers", type=int, default=0, help="DataLoader workers for batched apply")
     ap.add_argument("--batch-size", type=int, default=32, help="Batch size for batched apply")
@@ -518,7 +520,7 @@ def main():
 
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
 
-    # Global determinism
+    # baseline determinism for apply stage
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
 
@@ -534,7 +536,8 @@ def main():
     class_manifest_index = build_manifest_index(class_manifest)
     class_manifest_sha256 = file_sha256(args.class_manifest)
 
-    # Single pass: load models -> generate deltas -> apply deltas.
+    # text-to-unlearnable-examples t2ue flow
+    # load models then build deltas then apply to all images
     t0 = time.perf_counter()
     G, gen_cfg = load_t2ue_generator(args.t2ue_ckpt, device=device)
     clip_model = load_openai_clip_surrogate(args.clip_model, device=device)

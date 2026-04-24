@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 
+# text-to-unlearnable-examples t2ue trains generator on mscoco pairs
+# this helper builds deterministic annotation subsets for controlled ablations
 def _load_json(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"Source annotation file does not exist: {path}")
@@ -43,7 +45,7 @@ def _stable_subset(data: Dict[str, Any], fraction: float, seed: int) -> Dict[str
     image_by_id = {img["id"]: img for img in images}
     subset_images = [image_by_id[iid] for iid in sampled_ids]
 
-    # Preserve source annotation order while filtering to selected image ids.
+    # keep source annotation order while filtering selected image ids
     subset_annotations = [ann for ann in annotations if ann.get("image_id") in sampled_id_set]
 
     subset_payload: Dict[str, Any] = {}
@@ -96,6 +98,7 @@ def main() -> None:
     src = _load_json(src_path)
     _validate_coco_payload(src)
 
+    # subset is deterministic for same source fraction seed
     subset = _stable_subset(src, fraction=args.fraction, seed=args.seed)
     _write_json(out_path, subset)
 
@@ -108,6 +111,7 @@ def main() -> None:
 
     sampled_preview = [img.get("id") for img in subset["images"][:10]]
 
+    # diagnostics make t2ue data prep fully auditable
     diagnostics = {
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
         "script": "scripts/subset_coco_annotations.py",
@@ -129,13 +133,13 @@ def main() -> None:
     _write_json(diag_path, diagnostics)
 
     print("Created deterministic COCO subset annotation file")
-    print(f"  source:      {src_path}")
-    print(f"  output:      {out_path}")
-    print(f"  diagnostics: {diag_path}")
-    print(f"  fraction:    {args.fraction}")
-    print(f"  seed:        {args.seed}")
-    print(f"  images:      {n_images_out}/{n_images_in}")
-    print(f"  annotations: {n_annotations_out}/{n_annotations_in}")
+    print(f"source: {src_path}")
+    print(f"output: {out_path}")
+    print(f"diagnostics: {diag_path}")
+    print(f"fraction: {args.fraction}")
+    print(f"seed: {args.seed}")
+    print(f"images: {n_images_out}/{n_images_in}")
+    print(f"annotations: {n_annotations_out}/{n_annotations_in}")
 
 
 if __name__ == "__main__":

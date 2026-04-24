@@ -11,10 +11,12 @@ import numpy as np
 Z_SEED_MAX_DEFAULT = 2**31 - 1
 
 
+# keep header matching robust across csv schema variants
 def _normalize_header(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", name.lower())
 
 
+# pick first accepted column name after normalization
 def _pick_header(fieldnames: List[str], candidate_headers: List[str], description: str) -> str:
     if not fieldnames:
         raise RuntimeError("CSV has no header")
@@ -31,6 +33,7 @@ def _pick_header(fieldnames: List[str], candidate_headers: List[str], descriptio
     )
 
 
+# clean names used inside t2ue prompts
 def clean_identity_name(name: str) -> str:
     text = str(name).replace("_", " ").strip()
     if not text:
@@ -54,6 +57,7 @@ def clean_identity_name(name: str) -> str:
     return text
 
 
+# read class_id raw_id pairs from project manifest
 def load_manifest_identities(manifest_csv: str) -> List[Dict[str, object]]:
     by_label: Dict[int, str] = {}
 
@@ -88,6 +92,7 @@ def load_manifest_identities(manifest_csv: str) -> List[Dict[str, object]]:
     return [{"class_id": c, "raw_id": by_label[c]} for c in sorted(by_label.keys())]
 
 
+# optional map from identity id to human name for prompt text
 def load_annotation_name_map(annotation_csv: str) -> Dict[str, str]:
     name_map: Dict[str, str] = {}
 
@@ -115,7 +120,7 @@ def load_annotation_name_map(annotation_csv: str) -> Dict[str, str]:
             if not cleaned_name:
                 continue
 
-            # Keep first non-empty cleaned name if duplicates appear.
+            # keep first cleaned name if duplicate keys exist
             if identity_key not in name_map:
                 name_map[identity_key] = cleaned_name
 
@@ -132,6 +137,8 @@ def build_manifest(
     if max_z_seed <= 0:
         raise RuntimeError("max_z_seed must be positive")
 
+    # text-to-unlearnable-examples t2ue uses text prompts plus latent z
+    # this builds deterministic per-class prompt and z_seed config
     rng = np.random.default_rng(master_seed)
     used_z = set()
 
@@ -202,6 +209,7 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # class manifest is reused by generate_only_t2ue for zero-contact delta gen
     classes = load_manifest_identities(args.manifest_csv)
     name_map = load_annotation_name_map(args.annotation_csv)
 
@@ -225,6 +233,7 @@ def main():
     with open(out_manifest, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
 
+    # config sidecar keeps provenance for audits and regeneration
     config = {
         "manifest_csv": str(Path(args.manifest_csv)),
         "annotation_csv": str(Path(args.annotation_csv)),

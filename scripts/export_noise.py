@@ -12,12 +12,15 @@ from t2ue.models.generator import T2UEGenerator, GenConfig
 from t2ue.utils.checkpoint import load_checkpoint
 from t2ue.utils.seed import seed_all
 
+# text-to-unlearnable-examples t2ue zero-contact export stage
+# generate delta_u from text prompts with frozen clip plus trained generator
 def read_prompts(path: str) -> List[str]:
     with open(path, "r") as f:
         lines = [ln.strip() for ln in f.readlines()]
     return [ln for ln in lines if ln]
 
 
+# warn if bn stats look unstable before eval export
 def warn_if_bn_stats_look_unreliable(model: nn.Module) -> None:
     bad_layers = []
     for name, mod in model.named_modules():
@@ -40,17 +43,11 @@ def warn_if_bn_stats_look_unreliable(model: nn.Module) -> None:
 
 @torch.no_grad()
 def main(ckpt: str, prompts_path: str, out_dir: str, model_name: str, seed: int = 123):
-    """
-    Zero-Contact generation stage
-    Given a trained generator G checkpoint, and a list of text prompts,
-    generate and save CLIP-normalized perturbations delta_u for each prompt.
-    """
-    
-    
+    # seed controls z sampling and prompt order effects
     seed_all(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Load trained generator G
+    # load trained t2ue generator G
     payload = load_checkpoint(ckpt, map_location="cpu")
     gen_cfg = GenConfig(**payload["gen_cfg"])
     G = T2UEGenerator(gen_cfg).to(device)
@@ -58,22 +55,20 @@ def main(ckpt: str, prompts_path: str, out_dir: str, model_name: str, seed: int 
     G.eval()
     warn_if_bn_stats_look_unreliable(G)
 
-    ## Load frozen CLIP surrogate to compute text embeddings
+    # frozen clip text encoder as in t2ue
     clip_model = OpenAIClipSurrogate(model_name, device=device).to(device)
 
     prompts = read_prompts(prompts_path)
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    # TODO: Determinism for class wise noise generation 
-    # Script currently seeds globally at start
-    # fix z seed per class prompt or uniqye seeds per sample
+    # one delta per prompt with z ~ N(0 I)
     for i, text in enumerate(prompts):
         emb_t = clip_model.encode_text([text])  # (1,D)
         z = torch.randn(1, gen_cfg.z_dim, device=device) 
         delta = G(emb_t, z).cpu().numpy()[0]  # (3,H,W)
 
-        # Save as .npy in CLIP-normalized tensor space
+        # save in clip-normalized tensor space
         np.save(out / f"delta_{i:05d}.npy", delta)
         with open(out / f"delta_{i:05d}.txt", "w") as f:
             f.write(text + "\n")
